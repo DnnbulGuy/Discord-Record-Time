@@ -33,6 +33,52 @@ active_sessions = {} # {user_id: (join_time, channel_id)}
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
 
+# 상단에 알림을 보낼 채널 ID 설정 (이미 있다면 pass)
+LOG_CHANNEL_ID = 123456789012345678 # 알림 메시지가 올라올 텍스트 채널 ID
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    # 알림을 보낼 텍스트 채널 객체 가져오기
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    
+    # 1. 입장 (before.channel이 없고 after.channel이 있는 경우)
+    if before.channel is None and after.channel is not None:
+        start_time[member.id] = time.time()
+        print(f"[기록 시작] {member.display_name} -> {after.channel.name}") # 터미널 로그
+        
+        if log_channel:
+            await log_channel.send(f"📥 **{member.display_name}**님이 `{after.channel.name}` 채널에 입장하셨습니다.")
+
+    # 2. 퇴장 (before.channel이 있고 after.channel이 없는 경우)
+    elif before.channel is not None and after.channel is None:
+        if member.id in start_time:
+            end_time = time.time()
+            duration = end_time - start_time[member.id]
+            del start_time[member.id]
+
+            # 가중치 계산 (기존 로직 유지)
+            weight = 0.5 if before.channel.id == HALF_TIME_CHANNEL_ID else 1.0
+            final_duration = duration * weight
+
+            # DB 저장
+            save_to_db(member.id, final_duration)
+            
+            print(f"[기록 완료] {member.display_name}: {int(final_duration)}초 (가중치 {weight}x)")
+            
+            if log_channel:
+                m, s = divmod(int(final_duration), 60)
+                await log_channel.send(
+                    f"📤 **{member.display_name}**님이 `{before.channel.name}`에서 퇴장하셨습니다. "
+                    f"(기록 시간: {m}분 {s}초, 가중치: {weight}x)"
+                )
+
+    # 3. 채널 이동 (before.channel과 after.channel이 모두 있고 서로 다른 경우)
+    elif before.channel is not None and after.channel is not None and before.channel != after.channel:
+        # 이동 시에는 기존 채널 퇴장 처리 후 새 채널 입장 처리를 한 번에 수행하거나, 
+        # 간단하게 이동 알림만 띄울 수 있습니다.
+        if log_channel:
+            await log_channel.send(f"🔄 **{member.display_name}**님이 `{before.channel.name}` ➡️ `{after.channel.name}`(으)로 이동하셨습니다.")
+
 @bot.event
 async def on_voice_state_update(member, before, after):
     # 1. 입장 또는 채널 이동 (어느 채널이든)
