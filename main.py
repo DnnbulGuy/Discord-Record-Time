@@ -101,6 +101,55 @@ async def on_voice_state_update(member, before, after):
         if log_channel:
             await log_channel.send(f"🔄 **{member.display_name}**님이 `{before.channel.name}` ➡️ `{after.channel.name}`(으)로 이동하셨습니다.")
 
+@bot.command(name="접속확인")
+async def check_my_time(ctx):
+    user_id = ctx.author.id
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    
+    # 1. DB에서 저장된 누적 시간 가져오기
+    cur.execute('SELECT total_seconds FROM user_stats WHERE user_id = ?', (user_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    saved_seconds = row[0] if row else 0
+    current_session_seconds = 0
+    is_active = False
+
+    # 2. 명령어를 입력한 '지금 이 순간'의 시간을 가져와서 실시간 계산
+    if user_id in active_sessions:
+        join_time, channel_id = active_sessions[user_id] # 봇이 기억하는 입장 시간
+        now = datetime.now()
+        
+        # 지금(명령어 입력 시점) - 들어온 시간 = 실시간 접속 초
+        elapsed = int((now - join_time).total_seconds())
+        
+        # 현재 채널 가중치 적용
+        weight = 0.5 if channel_id == HALF_TIME_CHANNEL_ID else 1.0
+        current_session_seconds = elapsed * weight
+        is_active = True
+
+    # 3. 최종 합산
+    total_sec = saved_seconds + current_session_seconds
+    
+    # 시간 포맷팅 (h/m/s)
+    h, m = divmod(int(total_sec) // 60, 60)
+    s = int(total_sec) % 60
+    
+    color = discord.Color.blue() if is_active else discord.Color.gray()
+    status_icon = "🟢" if is_active else "⚪"
+    
+    embed = discord.Embed(
+        title=f"{status_icon} {ctx.author.display_name}님의 실시간 접속 정보",
+        description=f"현재까지 누적된 총 시간은\n**{h}시간 {m}분 {s}초** 입니다.",
+        color=color
+    )
+    
+    if is_active:
+        embed.set_footer(text=f"현재 세션 가중치: {weight}x 적용 중")
+    
+    await ctx.send(embed=embed)
+
 @bot.command(name="전체현황")
 @commands.has_permissions(administrator=True)
 async def total_stats(ctx):
