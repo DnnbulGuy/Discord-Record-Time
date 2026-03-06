@@ -136,7 +136,8 @@ async def check_my_time(ctx):
     h, m = divmod(int(total_sec) // 60, 60)
     s = int(total_sec) % 60
     
-    color = discord.Color.blue() if is_active else discord.Color.grey()
+    # 파란색(접속 중) : 0x3498db / 회색(미접속) : 0x95a5a6
+    color = discord.Color(0x3498db) if is_active else discord.Color(0x95a5a6)
     status_icon = "🟢" if is_active else "⚪"
     
     embed = discord.Embed(
