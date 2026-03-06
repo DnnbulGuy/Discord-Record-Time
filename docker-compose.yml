@@ -1,0 +1,10 @@
+version: '3'
+services:
+  bot:
+    build: .
+    container_name: discord-time-bot
+    restart: always
+    volumes:
+      - ./data:/app/data  # VM의 ./data 폴더와 컨테이너 연결
+    environment:
+      - BOT_TOKEN=여기에_디스코드_토큰_입력
