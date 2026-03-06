@@ -151,37 +151,69 @@ async def check_my_time(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name="전체현황")
-@commands.has_permissions(administrator=True)
 async def total_stats(ctx):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute('SELECT user_id, total_seconds FROM user_stats ORDER BY total_seconds DESC LIMIT 10')
-    rows = cur.fetchall()
+    cur.execute('SELECT user_id, total_seconds FROM user_stats')
+    db_rows = cur.fetchall()
     conn.close()
 
-    if not rows:
-        await ctx.send("📊 데이터가 없습니다.")
+    # 1. 모든 유저의 실시간 합산 데이터 생성
+    all_data = []
+    for uid, saved_sec in db_rows:
+        current_session = 0
+        is_online = False
+        
+        # 실시간 세션 계산 (접속 중인 경우)
+        if uid in active_sessions:
+            join_time, channel_id = active_sessions[uid]
+            elapsed = (datetime.now() - join_time).total_seconds()
+            weight = 0.5 if channel_id == HALF_TIME_CHANNEL_ID else 1.0
+            current_session = elapsed * weight
+            is_online = True
+            
+        all_data.append({
+            'uid': uid,
+            'total': saved_sec + current_session,
+            'is_online': is_online
+        })
+
+    # 2. 합산 시간 기준 내림차순 정렬 (상위 10명)
+    all_data.sort(key=lambda x: x['total'], reverse=True)
+    top_10 = all_data[:10]
+
+    if not top_10:
+        await ctx.send("📊 아직 기록된 데이터가 없습니다.")
         return
 
-    table = "순위 | 유저명 | 시간\n--- | --- | ---\n"
-    for i, (uid, sec) in enumerate(rows, 1):
-        user = ctx.guild.get_member(uid)
-        if user is None:
-            try:
-                user = await ctx.guild.fetch_member(uid)
-            except:
-                user = None
-
-        name = user.display_name if user else f"Unknown({uid})"
-        h, m = divmod(sec // 60, 60)
-        s = sec % 60
-        table += f"{i}위 | {name} | {h}h {m}m {s}s\n"
-
+    # 3. 임베드 UI 구성
     embed = discord.Embed(
-        title="📂 관리자 대시보드", 
-        description=f"```\n{table}```",
-        color=discord.Color.green()
+        title="🏆 전체 접속 시간 랭킹 (실시간)",
+        description="채널에 머문 누적 시간 순위입니다. (실시간 합산 중)",
+        color=discord.Color.gold(),
+        timestamp=datetime.now()
     )
+
+    medal_icons = ["🥇", "🥈", "🥉", "🏅", "🏅", "🏅", "🏅", "🏅", "🏅", "🏅"]
+    
+    rank_list = ""
+    for i, data in enumerate(top_10):
+        user = ctx.guild.get_member(data['uid'])
+        if user is None:
+            try: user = await ctx.guild.fetch_member(data['uid'])
+            except: user = None
+            
+        name = user.display_name if user else f"Unknown({data['uid']})"
+        online_mark = "🟢" if data['is_online'] else "⚪"
+        
+        h, m = divmod(int(data['total']) // 60, 60)
+        s = int(data['total']) % 60
+        
+        rank_list += f"{medal_icons[i]} **{i+1}위** | {online_mark} `{name}`\n┗ ⏱️ **{h}h {m}m {s}s**\n\n"
+
+    embed.add_field(name="━━━━━━━━━━━━━━━━━━", value=rank_list, inline=False)
+    embed.set_footer(text=f"요청자: {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
+    
     await ctx.send(embed=embed)
 
 bot.run(os.getenv('BOT_TOKEN'))
