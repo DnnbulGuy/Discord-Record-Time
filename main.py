@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 DB_PATH = '/app/data/discord_bot.db' 
 HALF_TIME_CHANNEL_ID = int(os.getenv('HALF_TIME_CHANNEL_ID'))
 LOG_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID'))
-KST = timezone(timedelta(hours=9)) # 한국 표준시 설정
+KST = timezone(timedelta(hours=9))
 
 # --- [2] DB 초기화 ---
 def init_db():
@@ -27,7 +27,7 @@ def init_db():
 
 init_db()
 
-# --- [3] 봇 클래스 정의 ---
+# --- [3] 봇 클래스 및 스케줄러 설정 ---
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -39,7 +39,6 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
-        # 월간 정산 스케줄러 (매달 1일 00:00 KST)
         self.scheduler = AsyncIOScheduler(timezone=KST)
         self.scheduler.add_job(
             monthly_force_save, 
@@ -47,21 +46,25 @@ class MyBot(commands.Bot):
             args=[self]
         )
         self.scheduler.start()
-        print("✅ 시스템 스케줄러 및 슬래시 명령어 동기화 완료!")
+        print("✅ 시스템 동기화 및 KST 스케줄러 활성화!")
 
 bot = MyBot()
 
-# --- [4] 유틸리티: 실시간 시간 계산 함수 ---
+# --- [4] 유틸리티: 실시간 계산 및 포맷팅 ---
 def calculate_realtime(user_id, saved_seconds, bot_instance):
     if user_id in bot_instance.active_sessions:
         join_time, channel_id = bot_instance.active_sessions[user_id]
         now_plain = datetime.now(KST).replace(tzinfo=None)
         elapsed = (now_plain - join_time).total_seconds()
         weight = 0.5 if channel_id == HALF_TIME_CHANNEL_ID else 1.0
-        return (saved_seconds or 0) + int(elapsed * weight), True, weight
-    return (saved_seconds or 0), False, 1.0
+        return (saved_seconds or 0) + int(elapsed * weight), True, weight, channel_id
+    return (saved_seconds or 0), False, 1.0, None
 
-# --- [5] 핵심 이벤트: 봇 준비 및 세션 복구 ---
+def format_time(seconds):
+    h, m = divmod(seconds // 60, 60)
+    return f"{h}시간 {m % 60}분"
+
+# --- [5] 핵심 이벤트: 세션 복구 및 입퇴장 ---
 @bot.event
 async def on_ready():
     now_plain = datetime.now(KST).replace(tzinfo=None)
@@ -72,21 +75,17 @@ async def on_ready():
                 if not member.bot:
                     bot.active_sessions[member.id] = (now_plain, vc.id)
                     recovery_count += 1
-    print(f'Logged in as {bot.user.name}')
-    print(f"🔄 세션 복구: {recovery_count}명의 유저를 다시 추적합니다.")
+    print(f'Logged in as {bot.user.name} | 복구 세션: {recovery_count}개')
 
-# --- [6] 핵심 이벤트: 음성 채널 상태 업데이트 ---
 @bot.event
 async def on_voice_state_update(member, before, after):
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     now_plain = datetime.now(KST).replace(tzinfo=None)
 
-    # 입장
     if before.channel is None and after.channel is not None:
         bot.active_sessions[member.id] = (now_plain, after.channel.id)
         if log_channel: await log_channel.send(f"📥 **{member.display_name}** 입장 -> `{after.channel.name}`")
 
-    # 퇴장
     elif before.channel is not None and after.channel is None:
         if member.id in bot.active_sessions:
             join_time, channel_id = bot.active_sessions.pop(member.id)
@@ -100,38 +99,29 @@ async def on_voice_state_update(member, before, after):
             cur.execute('UPDATE user_stats SET total_seconds = total_seconds + ? WHERE user_id = ?', (final_duration, member.id))
             conn.commit()
             conn.close()
-            if log_channel:
-                m, s = divmod(final_duration, 60)
-                await log_channel.send(f"📤 **{member.display_name}** 퇴장 | ⏱️ {m}분 {s}초 기록 완료")
+            if log_channel: await log_channel.send(f"📤 **{member.display_name}** 퇴장 | ⏱️ {final_duration//60}분 기록 완료")
 
-# --- [7] 스케줄러: 월간 강제 정산 및 공지 ---
+# --- [6] 스케줄러: 월간 정산 ---
 async def monthly_force_save(bot_instance):
     now_kst = datetime.now(KST)
-    current_month = now_kst.strftime("%Y-%m")
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    
     active_count = 0
     for user_id, (join_time, channel_id) in list(bot_instance.active_sessions.items()):
         now_plain = now_kst.replace(tzinfo=None)
         elapsed = int((now_plain - join_time).total_seconds())
         weight = 0.5 if channel_id == HALF_TIME_CHANNEL_ID else 1.0
-        final_duration = int(elapsed * weight)
-        cur.execute('UPDATE user_stats SET total_seconds = total_seconds + ? WHERE user_id = ?', (final_duration, user_id))
-        bot_instance.active_sessions[user_id] = (now_plain, channel_id) # 세션 갱신
+        cur.execute('UPDATE user_stats SET total_seconds = total_seconds + ? WHERE user_id = ?', (int(elapsed * weight), user_id))
+        bot_instance.active_sessions[user_id] = (now_plain, channel_id)
         active_count += 1
-
-    cur.execute('INSERT OR REPLACE INTO settings VALUES ("last_reset_month", ?)', (current_month,))
+    cur.execute('INSERT OR REPLACE INTO settings VALUES ("last_reset_month", ?)', (now_kst.strftime("%Y-%m"),))
     conn.commit()
     conn.close()
-
     log_channel = bot_instance.get_channel(LOG_CHANNEL_ID)
     if log_channel:
-        embed = discord.Embed(title=f"📅 {now_kst.strftime('%Y년 %m월')} 정산 리포트", color=0x5865F2)
-        embed.description = f"✅ 월간 자동 정산 완료! 접속 중인 {active_count}명의 기록이 안전하게 누적되었습니다."
-        await log_channel.send(embed=embed)
+        await log_channel.send(embed=discord.Embed(title=f"📅 {now_kst.month}월 정산 완료", description=f"접속 중인 {active_count}명의 기록이 누적치에 반영되었습니다.", color=0x5865F2))
 
-# --- [8] 일반 명령어: 순위표, 내기록, 도움말 ---
+# --- [7] 일반 명령어 (Slash) ---
 @bot.tree.command(name="순위표", description="전체 접속 시간 랭킹 상위 10명을 확인합니다.")
 async def leaderboard_s(interaction: discord.Interaction):
     conn = sqlite3.connect(DB_PATH)
@@ -140,19 +130,39 @@ async def leaderboard_s(interaction: discord.Interaction):
     rows = cur.fetchall()
     conn.close()
 
-    embed = discord.Embed(title="🏆 명예의 전당 (Top 10)", color=0xf1c40f)
+    embed = discord.Embed(title="🏆 전체 누적 랭킹", color=0xf1c40f)
     medal_icons = ["🥇", "🥈", "🥉", "🏅", "🏅", "🏅", "🏅", "🏅", "🏅", "🏅"]
     rank_list = ""
     for i, (uid, total_sec) in enumerate(rows):
-        total, online, _ = calculate_realtime(uid, total_sec, bot)
+        total, online, _, _ = calculate_realtime(uid, total_sec, bot)
         user = interaction.guild.get_member(uid)
         name = user.display_name if user else f"유저({uid})"
-        h, m = divmod(total // 60, 60)
-        rank_list += f"{medal_icons[i]} **{i+1}위** | {'🟢' if online else '⚪'} `{name}` (**{h}h {m % 60}m**)\n"
-    embed.description = rank_list
+        rank_list += f"{medal_icons[i]} **{i+1}위** | {'🟢' if online else '⚪'} **{name}**\n┗ ⏱️ `{format_time(total)}` 누적\n\n"
+    
+    embed.description = rank_list or "기록이 없습니다."
+    embed.set_footer(text=f"기준 시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} KST")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="내기록", description="나의 상세 접속 기록과 현재 순위를 확인합니다.")
+@bot.tree.command(name="접속확인", description="특정 유저의 상세 접속 정보를 확인합니다.")
+@app_commands.describe(member="확인할 유저를 선택하세요.")
+async def check_user_s(interaction: discord.Interaction, member: discord.Member):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('SELECT total_seconds FROM user_stats WHERE user_id = ?', (member.id,))
+    row = cur.fetchone()
+    conn.close()
+
+    total, online, weight, ch_id = calculate_realtime(member.id, row[0] if row else 0, bot)
+    embed = discord.Embed(title=f"📡 {member.display_name} 정보", color=0x2ecc71 if online else 0x95a5a6)
+    embed.add_field(name="상태", value="접속 중 🟢" if online else "오프라인 ⚪", inline=True)
+    embed.add_field(name="누적 시간", value=f"**{format_time(total)}**", inline=True)
+    if online:
+        channel = bot.get_channel(ch_id)
+        embed.add_field(name="현재 채널", value=f"`{channel.name if channel else '알 수 없음'}` ({weight}x)", inline=False)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="내기록", description="나의 순위와 시간을 확인합니다.")
 async def my_record_s(interaction: discord.Interaction):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -160,30 +170,25 @@ async def my_record_s(interaction: discord.Interaction):
     rows = cur.fetchall()
     conn.close()
 
-    user_sec, rank = 0, 0
-    for i, (uid, sec) in enumerate(rows):
-        if uid == interaction.user.id:
-            user_sec, rank = sec, i + 1; break
-
-    total, online, weight = calculate_realtime(interaction.user.id, user_sec, bot)
-    h, m = divmod(total // 60, 60)
-    embed = discord.Embed(title=f"👤 {interaction.user.display_name}님의 기록", color=0x2ecc71)
-    embed.add_field(name="📊 순위", value=f"**{rank if rank > 0 else '-'}**위", inline=True)
-    embed.add_field(name="⏱️ 시간", value=f"**{h}시간 {m % 60}분**", inline=True)
-    embed.add_field(name="📡 상태", value=f"{'🟢 접속 중 ('+str(weight)+'x)' if online else '⚪ 오프라인'}", inline=False)
+    sec, rank = 0, 0
+    for i, (uid, s) in enumerate(rows):
+        if uid == interaction.user.id: sec, rank = s, i + 1; break
+    total, online, weight, _ = calculate_realtime(interaction.user.id, sec, bot)
+    embed = discord.Embed(title=f"👤 {interaction.user.display_name} 기록", color=0x2ecc71)
+    embed.add_field(name="순위", value=f"**{rank}위**", inline=True)
+    embed.add_field(name="시간", value=f"**{format_time(total)}**", inline=True)
+    embed.add_field(name="상태", value=f"{'접속 중 ('+str(weight)+'x)' if online else '오프라인'}", inline=False)
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="도움말", description="명령어 사용법을 안내합니다.")
+@bot.tree.command(name="도움말", description="명령어 가이드")
 async def help_s(interaction: discord.Interaction):
-    embed = discord.Embed(title="📖 봇 사용 설명서", color=0x3498db)
-    embed.description = "모든 명령어는 `/` 슬래시를 사용하거나 `!` 접두사로 이용 가능합니다."
-    embed.add_field(name="🚀 명령어", value="`/순위표`, `/내기록`, `/접속확인`", inline=False)
+    embed = discord.Embed(title="📖 도움말", description="`/순위표`, `/내기록`, `/접속확인 @유저`", color=0x3498db)
     if interaction.user.guild_permissions.administrator:
         embed.add_field(name="🛠️ 관리자", value="`/시간수정 @유저 초`, `/db백업`", inline=False)
     await interaction.response.send_message(embed=embed)
 
-# --- [9] 관리자 명령어: 시간수정, DB백업 ---
-@bot.tree.command(name="시간수정", description="[관리자] 유저의 누적 시간을 수정합니다.")
+# --- [8] 관리자 명령어 (Slash) ---
+@bot.tree.command(name="시간수정", description="[관리자] 시간 수정")
 @app_commands.default_permissions(administrator=True)
 async def adjust_time_s(interaction: discord.Interaction, member: discord.Member, seconds: int):
     conn = sqlite3.connect(DB_PATH)
@@ -193,15 +198,15 @@ async def adjust_time_s(interaction: discord.Interaction, member: discord.Member
     cur.execute('SELECT total_seconds FROM user_stats WHERE user_id = ?', (member.id,))
     new_t = cur.fetchone()[0]
     conn.commit(); conn.close()
-    await interaction.response.send_message(f"🛠️ {member.display_name} 수정 완료 (최종: {new_t//3600}h {(new_t%3600)//60}m)")
+    await interaction.response.send_message(f"🛠️ {member.display_name} 수정 완료 (최종: {format_time(new_t)})")
 
-@bot.tree.command(name="db백업", description="[관리자] 현재 데이터베이스 파일을 즉시 전송받습니다.")
+@bot.tree.command(name="db백업", description="[관리자] DB 백업")
 @app_commands.default_permissions(administrator=True)
 async def db_backup_s(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    backup_file = f"backup_{datetime.now(KST).strftime('%Y%m%d_%H%M%S')}.db"
-    shutil.copy2(DB_PATH, backup_file)
-    await interaction.followup.send(content="📦 DB 백업 파일입니다.", file=discord.File(backup_file))
-    os.remove(backup_file)
+    file_path = f"backup_{datetime.now(KST).strftime('%Y%m%d_%H%M%S')}.db"
+    shutil.copy2(DB_PATH, file_path)
+    await interaction.followup.send(content="📦 DB 백업", file=discord.File(file_path))
+    os.remove(file_path)
 
 bot.run(os.getenv('BOT_TOKEN'))
