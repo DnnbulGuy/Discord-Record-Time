@@ -6,8 +6,8 @@ from datetime import datetime
 
 # --- 설정 ---
 DB_PATH = '/app/data/discord_bot.db' 
-# 50%만 인정할 휴게실 채널 ID (나머지 채널은 자동으로 100% 계산)
 HALF_TIME_CHANNEL_ID = int(os.getenv('HALF_TIME_CHANNEL_ID'))
+LOG_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID'))
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -27,85 +27,79 @@ intents.voice_states = True
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-active_sessions = {} # {user_id: (join_time, channel_id)}
+# 유저의 세션을 추적하는 딕셔너리 {user_id: (join_time, channel_id)}
+active_sessions = {}
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
 
-# 상단에 알림을 보낼 채널 ID 설정 (이미 있다면 pass)
-LOG_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID')) # 알림 메시지가 올라올 텍스트 채널 ID
-
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # 알림을 보낼 텍스트 채널 객체 가져오기
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     
-    # 1. 입장 (before.channel이 없고 after.channel이 있는 경우)
+    # 1. 입장 (채널에 새로 들어옴)
     if before.channel is None and after.channel is not None:
-        start_time[member.id] = time.time()
-        print(f"[기록 시작] {member.display_name} -> {after.channel.name}") # 터미널 로그
-        
+        active_sessions[member.id] = (datetime.now(), after.channel.id)
+        print(f"[기록 시작] {member.display_name} -> {after.channel.name}")
         if log_channel:
             await log_channel.send(f"📥 **{member.display_name}**님이 `{after.channel.name}` 채널에 입장하셨습니다.")
 
-    # 2. 퇴장 (before.channel이 있고 after.channel이 없는 경우)
+    # 2. 퇴장 (채널에서 완전히 나감)
     elif before.channel is not None and after.channel is None:
-        if member.id in start_time:
-            end_time = time.time()
-            duration = end_time - start_time[member.id]
-            del start_time[member.id]
-
-            # 가중치 계산 (기존 로직 유지)
-            weight = 0.5 if before.channel.id == HALF_TIME_CHANNEL_ID else 1.0
-            final_duration = duration * weight
-
-            # DB 저장
-            save_to_db(member.id, final_duration)
+        if member.id in active_sessions:
+            join_time, channel_id = active_sessions.pop(member.id)
+            raw_duration = int((datetime.now() - join_time).total_seconds())
             
-            print(f"[기록 완료] {member.display_name}: {int(final_duration)}초 (가중치 {weight}x)")
+            # 가중치 판별 및 계산
+            is_half_time = (channel_id == HALF_TIME_CHANNEL_ID)
+            weight = 0.5 if is_half_time else 1.0
+            final_duration = int(raw_duration * weight)
+            
+            # DB 저장
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute('INSERT INTO voice_logs VALUES (?, ?, ?, ?)', 
+                        (member.id, join_time.isoformat(), datetime.now().isoformat(), final_duration))
+            cur.execute('''INSERT INTO user_stats (user_id, total_seconds) VALUES (?, ?)
+                           ON CONFLICT(user_id) DO UPDATE SET total_seconds = total_seconds + ?''', 
+                        (member.id, final_duration, final_duration))
+            conn.commit()
+            conn.close()
+
+            # 로그 메시지 조립
+            weight_notice = "(⚠️ 50% 가중치 적용됨)" if is_half_time else "(100% 정상 기록)"
+            print(f"[기록 완료] {member.display_name}: {final_duration}초 {weight_notice}")
             
             if log_channel:
-                m, s = divmod(int(final_duration), 60)
+                m, s = divmod(final_duration, 60)
                 await log_channel.send(
-                    f"📤 **{member.display_name}**님이 `{before.channel.name}`에서 퇴장하셨습니다. "
-                    f"(기록 시간: {m}분 {s}초, 가중치: {weight}x)"
+                    f"📤 **{member.display_name}**님이 `{before.channel.name}`에서 퇴장하셨습니다.\n"
+                    f"⏱️ **최종 기록 시간:** {m}분 {s}초 {weight_notice}"
                 )
 
-    # 3. 채널 이동 (before.channel과 after.channel이 모두 있고 서로 다른 경우)
-    elif before.channel is not None and after.channel is not None and before.channel != after.channel:
-        # 이동 시에는 기존 채널 퇴장 처리 후 새 채널 입장 처리를 한 번에 수행하거나, 
-        # 간단하게 이동 알림만 띄울 수 있습니다.
+    # 3. 채널 이동 (이전 채널과 다음 채널이 모두 있는 경우)
+    elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
+        # 기존 기록 정산
+        if member.id in active_sessions:
+            join_time, old_channel_id = active_sessions.pop(member.id)
+            raw_duration = int((datetime.now() - join_time).total_seconds())
+            
+            weight = 0.5 if old_channel_id == HALF_TIME_CHANNEL_ID else 1.0
+            final_duration = int(raw_duration * weight)
+
+            # DB 저장 로직 (중복 방지를 위해 실제로는 함수화하는 게 좋음)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute('INSERT INTO voice_logs VALUES (?, ?, ?, ?)', (member.id, join_time.isoformat(), datetime.now().isoformat(), final_duration))
+            cur.execute('INSERT INTO user_stats (user_id, total_seconds) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET total_seconds = total_seconds + ?', (member.id, final_duration, final_duration))
+            conn.commit()
+            conn.close()
+
+        # 새로운 채널 세션 시작
+        active_sessions[member.id] = (datetime.now(), after.channel.id)
         if log_channel:
             await log_channel.send(f"🔄 **{member.display_name}**님이 `{before.channel.name}` ➡️ `{after.channel.name}`(으)로 이동하셨습니다.")
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    # 1. 입장 또는 채널 이동 (어느 채널이든)
-    if after.channel is not None:
-        if member.id not in active_sessions or active_sessions[member.id][1] != after.channel.id:
-            active_sessions[member.id] = (datetime.now(), after.channel.id)
-
-    # 2. 퇴장 또는 채널 이동 시 기존 기록 마감
-    if before.channel is not None:
-        if after.channel is None or after.channel.id != before.channel.id:
-            if member.id in active_sessions:
-                join_time, channel_id = active_sessions.pop(member.id)
-                raw_duration = int((datetime.now() - join_time).total_seconds())
-                
-                # 가중치 적용: 특정 ID만 0.5, 나머지는 1.0
-                weight = 0.5 if channel_id == HALF_TIME_CHANNEL_ID else 1.0
-                final_duration = int(raw_duration * weight)
-
-                conn = sqlite3.connect(DB_PATH)
-                cur = conn.cursor()
-                cur.execute('INSERT INTO voice_logs VALUES (?, ?, ?, ?)', 
-                            (member.id, join_time.isoformat(), datetime.now().isoformat(), final_duration))
-                cur.execute('''INSERT INTO user_stats (user_id, total_seconds) VALUES (?, ?)
-                               ON CONFLICT(user_id) DO UPDATE SET total_seconds = total_seconds + ?''', 
-                            (member.id, final_duration, final_duration))
-                conn.commit()
-                conn.close()
 
 @bot.command(name="전체현황")
 @commands.has_permissions(administrator=True)
@@ -121,12 +115,8 @@ async def total_stats(ctx):
         return
 
     table = "순위 | 유저명 | 시간\n--- | --- | ---\n"
-    
     for i, (uid, sec) in enumerate(rows, 1):
-        # 1. 먼저 캐시에서 유저를 찾음
         user = ctx.guild.get_member(uid)
-        
-        # 2. 캐시에 없으면 API로 직접 서버에서 정보를 땡겨옴 (비동기 처리 필수)
         if user is None:
             try:
                 user = await ctx.guild.fetch_member(uid)
@@ -134,8 +124,6 @@ async def total_stats(ctx):
                 user = None
 
         name = user.display_name if user else f"Unknown({uid})"
-        
-        # 3. 시간 계산 (초 단위까지 보고 싶다면 s 추가)
         h, m = divmod(sec // 60, 60)
         s = sec % 60
         table += f"{i}위 | {name} | {h}h {m}m {s}s\n"
@@ -146,5 +134,5 @@ async def total_stats(ctx):
         color=discord.Color.green()
     )
     await ctx.send(embed=embed)
-    
+
 bot.run(os.getenv('BOT_TOKEN'))
