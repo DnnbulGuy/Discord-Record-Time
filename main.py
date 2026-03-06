@@ -7,7 +7,7 @@ from datetime import datetime
 # --- 설정 ---
 DB_PATH = '/app/data/discord_bot.db' 
 # 50%만 인정할 휴게실 채널 ID (나머지 채널은 자동으로 100% 계산)
-HALF_TIME_CHANNEL_ID = 987654321098765432 
+HALF_TIME_CHANNEL_ID = int(os.getenv('HALF_TIME_CHANNEL_ID'))
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -34,7 +34,7 @@ async def on_ready():
     print(f'Logged in as {bot.user.name}')
 
 # 상단에 알림을 보낼 채널 ID 설정 (이미 있다면 pass)
-LOG_CHANNEL_ID = 123456789012345678 # 알림 메시지가 올라올 텍스트 채널 ID
+LOG_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID')) # 알림 메시지가 올라올 텍스트 채널 ID
 
 @bot.event
 async def on_voice_state_update(member, before, after):
