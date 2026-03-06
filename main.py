@@ -75,12 +75,30 @@ async def total_stats(ctx):
         return
 
     table = "순위 | 유저명 | 시간\n--- | --- | ---\n"
+    
     for i, (uid, sec) in enumerate(rows, 1):
+        # 1. 먼저 캐시에서 유저를 찾음
         user = ctx.guild.get_member(uid)
+        
+        # 2. 캐시에 없으면 API로 직접 서버에서 정보를 땡겨옴 (비동기 처리 필수)
+        if user is None:
+            try:
+                user = await ctx.guild.fetch_member(uid)
+            except:
+                user = None
+
         name = user.display_name if user else f"Unknown({uid})"
+        
+        # 3. 시간 계산 (초 단위까지 보고 싶다면 s 추가)
         h, m = divmod(sec // 60, 60)
-        table += f"{i}위 | {name} | {h}h {m}m\n"
+        s = sec % 60
+        table += f"{i}위 | {name} | {h}h {m}m {s}s\n"
 
-    await ctx.send(embed=discord.Embed(title="📂 관리자 대시보드", description=f"```\n{table}```"))
-
+    embed = discord.Embed(
+        title="📂 관리자 대시보드", 
+        description=f"```\n{table}```",
+        color=discord.Color.green()
+    )
+    await ctx.send(embed=embed)
+    
 bot.run(os.getenv('BOT_TOKEN'))
