@@ -14,14 +14,18 @@ HALF_TIME_CHANNEL_ID = int(os.getenv('HALF_TIME_CHANNEL_ID'))
 LOG_CHANNEL_ID = int(os.getenv('TARGET_CHANNEL_ID'))
 KST = timezone(timedelta(hours=9))
 
-# --- [2] DB 초기화 ---
+# --- [2] DB 초기화 (월간 테이블 추가) ---
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # 전체 누적 테이블
     cur.execute('''CREATE TABLE IF NOT EXISTS user_stats 
                    (user_id INTEGER PRIMARY KEY, total_seconds INTEGER DEFAULT 0)''')
-    cur.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
+    # 월별 누적 테이블 (유저ID와 해당 월을 묶어서 관리)
+    cur.execute('''CREATE TABLE IF NOT EXISTS monthly_stats 
+                   (user_id INTEGER, month TEXT, seconds INTEGER DEFAULT 0,
+                    PRIMARY KEY (user_id, month))''')
     conn.commit()
     conn.close()
 
@@ -65,10 +69,19 @@ def format_time(seconds):
     return f"{h}시간 {m % 60}분"
 
 def save_to_db(user_id, duration):
+def save_to_db(user_id, duration):
+    current_month = datetime.now(KST).strftime("%Y-%m")
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    
+    # 1. 전체 누적 업데이트
     cur.execute('INSERT OR IGNORE INTO user_stats (user_id, total_seconds) VALUES (?, 0)', (user_id,))
     cur.execute('UPDATE user_stats SET total_seconds = total_seconds + ? WHERE user_id = ?', (duration, user_id))
+    
+    # 2. 이번 달 누적 업데이트
+    cur.execute('INSERT OR IGNORE INTO monthly_stats (user_id, month, seconds) VALUES (?, ?, 0)', (user_id, current_month))
+    cur.execute('UPDATE monthly_stats SET seconds = seconds + ? WHERE user_id = ? AND month = ?', (duration, user_id, current_month))
+    
     conn.commit()
     conn.close()
 
@@ -140,43 +153,40 @@ async def monthly_force_save(bot_instance):
         await log_channel.send(embed=discord.Embed(title=f"📅 {now_kst.month}월 정산 완료", description=f"접속 중인 {active_count}명의 기록이 누적치에 반영되었습니다.", color=0x5865F2))
 
 # --- [7] 일반 명령어 (Slash) ---
-@bot.tree.command(name="순위표", description="전체 접속 시간 랭킹 상위 10명을 확인합니다.")
-async def leaderboard_s(interaction: discord.Interaction):
+@bot.tree.command(name="순위표", description="접속 시간 랭킹을 확인합니다.")
+@app_commands.choices(유형=[
+    app_commands.Choice(name="전체 누적", value="total"),
+    app_commands.Choice(name="이번 달 (월간)", value="monthly")
+])
+async def leaderboard_s(interaction: discord.Interaction, 유형: str = "total"):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute('SELECT user_id, total_seconds FROM user_stats ORDER BY total_seconds DESC LIMIT 10')
+    
+    current_month = datetime.now(KST).strftime("%Y-%m")
+    
+    if 유형 == "total":
+        title = "🏆 전체 누적 랭킹"
+        cur.execute('SELECT user_id, total_seconds FROM user_stats ORDER BY total_seconds DESC LIMIT 10')
+    else:
+        title = f"📅 {datetime.now(KST).month}월 이달의 랭킹"
+        cur.execute('SELECT user_id, seconds FROM monthly_stats WHERE month = ? ORDER BY seconds DESC LIMIT 10', (current_month,))
+    
     rows = cur.fetchall()
     conn.close()
 
-    embed = discord.Embed(title="🏆 전체 누적 랭킹", color=0xf1c40f)
+    embed = discord.Embed(title=title, color=0xf1c40f if 유형 == "total" else 0x3498db)
     medal_icons = ["🥇", "🥈", "🥉", "🏅", "🏅", "🏅", "🏅", "🏅", "🏅", "🏅"]
+    
     rank_list = ""
-    for i, (uid, total_sec) in enumerate(rows):
-        total, online, _, _ = calculate_realtime(uid, total_sec, bot)
+    for i, (uid, sec) in enumerate(rows):
+        # 실시간 세션 값 반영 로직 (현재 접속 중인 경우만 더해서 보여줌)
+        display_sec, online, _, _ = calculate_realtime(uid, sec, bot)
         user = interaction.guild.get_member(uid)
         name = user.display_name if user else f"유저({uid})"
-        rank_list += f"{medal_icons[i]} **{i+1}위** | {'🟢' if online else '⚪'} **{name}**\n┗ ⏱️ `{format_time(total)}` 누적\n\n"
+        rank_list += f"{medal_icons[i]} **{i+1}위** | {'🟢' if online else '⚪'} **{name}**\n┗ ⏱️ `{format_time(display_sec)}` 누적\n\n"
     
-    embed.description = rank_list or "기록이 없습니다."
+    embed.description = rank_list or "아직 이번 달 기록이 없습니다."
     embed.set_footer(text=f"기준 시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} KST")
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="접속확인", description="특정 유저의 상세 접속 정보를 확인합니다.")
-async def check_user_s(interaction: discord.Interaction, member: discord.Member):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute('SELECT total_seconds FROM user_stats WHERE user_id = ?', (member.id,))
-    row = cur.fetchone()
-    conn.close()
-
-    total, online, weight, ch_id = calculate_realtime(member.id, row[0] if row else 0, bot)
-    embed = discord.Embed(title=f"📡 {member.display_name} 정보", color=0x2ecc71 if online else 0x95a5a6)
-    embed.add_field(name="상태", value="접속 중 🟢" if online else "오프라인 ⚪", inline=True)
-    embed.add_field(name="누적 시간", value=f"**{format_time(total)}**", inline=True)
-    if online:
-        channel = bot.get_channel(ch_id)
-        embed.add_field(name="현재 채널", value=f"`{channel.name if channel else '알 수 없음'}` ({weight}x)", inline=False)
-    embed.set_thumbnail(url=member.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="내기록", description="나의 순위와 시간을 확인합니다.")
