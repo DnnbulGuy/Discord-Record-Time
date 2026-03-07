@@ -102,10 +102,22 @@ async def on_voice_state_update(member, before, after):
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     now_plain = datetime.now(KST).replace(tzinfo=None)
 
+    # 공통 엠베드 설정 함수
+    def get_base_embed(title, color):
+        embed = discord.Embed(title=title, color=color, timestamp=datetime.now(KST))
+        embed.set_author(name=f"{member.display_name} ({member.name})", icon_url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        return embed
+
     # 1. 입장
     if before.channel is None and after.channel is not None:
         bot.active_sessions[member.id] = (now_plain, after.channel.id)
-        if log_channel: await log_channel.send(f"📥 **{member.display_name}** 입장 -> `{after.channel.name}`")
+        if log_channel:
+            embed = get_base_embed("📥 음성 채널 입장", 0x2ecc71) # 녹색
+            embed.add_field(name="채널", value=f"`{after.channel.name}`", inline=True)
+            weight = 0.5 if after.channel.id == HALF_TIME_CHANNEL_ID else 1.0
+            embed.add_field(name="적용 가중치", value=f"**{weight}x**", inline=True)
+            await log_channel.send(embed=embed)
 
     # 2. 퇴장
     elif before.channel is not None and after.channel is None:
@@ -115,9 +127,16 @@ async def on_voice_state_update(member, before, after):
             weight = 0.5 if channel_id == HALF_TIME_CHANNEL_ID else 1.0
             final_duration = int(elapsed * weight)
             save_to_db(member.id, final_duration)
-            if log_channel: await log_channel.send(f"📤 **{member.display_name}** 퇴장 | ⏱️ {final_duration//60}분 기록 완료")
 
-    # 3. 채널 이동 (기록 저장 후 새 세션 시작)
+            if log_channel:
+                embed = get_base_embed("📤 음성 채널 퇴장", 0xe74c3c) # 적색
+                m, s = divmod(final_duration, 60)
+                embed.add_field(name="활동 시간", value=f"**{m}분 {s}초**", inline=True)
+                embed.add_field(name="최종 가중치", value=f"{weight}x", inline=True)
+                embed.set_footer(text="데이터베이스 저장 완료")
+                await log_channel.send(embed=embed)
+
+    # 3. 채널 이동
     elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
         if member.id in bot.active_sessions:
             join_time, old_ch_id = bot.active_sessions.pop(member.id)
@@ -126,10 +145,17 @@ async def on_voice_state_update(member, before, after):
             final_duration = int(elapsed * weight)
             save_to_db(member.id, final_duration)
             
-            # 새 채널로 세션 갱신
+            # 새 세션 시작
             bot.active_sessions[member.id] = (now_plain, after.channel.id)
+            new_weight = 0.5 if after.channel.id == HALF_TIME_CHANNEL_ID else 1.0
+
             if log_channel:
-                await log_channel.send(f"🔄 **{member.display_name}** 이동: `{before.channel.name}` -> `{after.channel.name}` (⏱️ {final_duration//60}분 저장됨)")
+                embed = get_base_embed("🔄 채널 이동 및 기록", 0x3498db) # 청색
+                m, s = divmod(final_duration, 60)
+                embed.add_field(name="이전 채널", value=f"`{before.channel.name}` ({weight}x)", inline=False)
+                embed.add_field(name="현재 채널", value=f"`{after.channel.name}` ({new_weight}x)", inline=False)
+                embed.add_field(name="이전 기록 저장", value=f"**{m}분 {s}초**", inline=True)
+                await log_channel.send(embed=embed)
 
 # --- [6] 스케줄러: 월간 정산 ---
 async def monthly_force_save(bot_instance):
