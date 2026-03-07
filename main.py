@@ -69,7 +69,6 @@ def format_time(seconds):
     return f"{h}시간 {m % 60}분"
 
 def save_to_db(user_id, duration):
-def save_to_db(user_id, duration):
     current_month = datetime.now(KST).strftime("%Y-%m")
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
