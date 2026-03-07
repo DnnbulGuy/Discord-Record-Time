@@ -212,32 +212,71 @@ async def leaderboard_s(interaction: discord.Interaction, 유형: str = "total")
     embed.set_footer(text=f"기준 시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} KST")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="내기록", description="나의 순위와 시간을 확인합니다.")
+@bot.tree.command(name="내기록", description="나의 상세 순위와 시간을 확인합니다.")
 async def my_record_s(interaction: discord.Interaction):
     conn = sqlite3.connect(DB_PATH, timeout=10)
     cur = conn.cursor()
+    # 전체 순위 계산을 위해 모든 유저 데이터 호출
     cur.execute('SELECT user_id, total_seconds FROM user_stats ORDER BY total_seconds DESC')
     rows = cur.fetchall()
     conn.close()
 
-    sec, rank = 0, 0
+    user_sec, rank = 0, 0
     for i, (uid, s) in enumerate(rows):
-        if uid == interaction.user.id: sec, rank = s, i + 1; break
-    total, online, weight, _ = calculate_realtime(interaction.user.id, sec, bot)
-    embed = discord.Embed(title=f"👤 {interaction.user.display_name} 기록", color=0x2ecc71)
-    embed.add_field(name="순위", value=f"**{rank}위**", inline=True)
-    embed.add_field(name="시간", value=f"**{format_time(total)}**", inline=True)
-    embed.add_field(name="상태", value=f"{'접속 중 ('+str(weight)+'x)' if online else '오프라인'}", inline=False)
+        if uid == interaction.user.id:
+            user_sec, rank = s, i + 1
+            break
+
+    total, online, weight, _ = calculate_realtime(interaction.user.id, user_sec, bot)
+    
+    # 디자인 통일: 유저 상태에 따른 색상 결정
+    status_color = 0x2ecc71 if online else 0x95a5a6
+    embed = discord.Embed(title="👤 나의 활동 리포트", color=status_color, timestamp=datetime.now(KST))
+    
+    avatar_url = interaction.user.display_avatar.url if interaction.user.display_avatar else None
+    embed.set_author(name=f"{interaction.user.display_name} 님의 기록", icon_url=avatar_url)
+    if avatar_url: embed.set_thumbnail(url=avatar_url)
+
+    embed.add_field(name="🏆 현재 순위", value=f"**{rank if rank > 0 else '-'}위**", inline=True)
+    embed.add_field(name="⏱️ 총 누적 시간", value=f"**{format_time(total)}**", inline=True)
+    
+    status_text = f"🟢 접속 중 ({weight}x)" if online else "⚪ 오프라인"
+    embed.add_field(name="📡 실시간 상태", value=status_text, inline=False)
+    
+    embed.set_footer(text="상세 기록은 순위표에서 확인할 수 있습니다.")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="접속확인", description="특정 유저의 상세 접속 정보를 확인합니다.")
-@app_commands.describe(member="확인할 유저를 선택하세요.")
+@bot.tree.command(name="접속확인", description="특정 유저의 상세 정보를 조회합니다.")
+@app_commands.describe(member="조회할 유저를 선택하세요.")
 async def check_user_s(interaction: discord.Interaction, member: discord.Member):
     conn = sqlite3.connect(DB_PATH, timeout=10)
     cur = conn.cursor()
     cur.execute('SELECT total_seconds FROM user_stats WHERE user_id = ?', (member.id,))
     row = cur.fetchone()
     conn.close()
+
+    total, online, weight, ch_id = calculate_realtime(member.id, row[0] if row else 0, bot)
+    
+    # 디자인 통일: 대상 유저 상태에 따른 색상
+    status_color = 0x2ecc71 if online else 0x95a5a6
+    embed = discord.Embed(title="📡 유저 정보 조회", color=status_color, timestamp=datetime.now(KST))
+    
+    avatar_url = member.display_avatar.url if member.display_avatar else None
+    embed.set_author(name=f"{member.display_name} ({member.name})", icon_url=avatar_url)
+    if avatar_url: embed.set_thumbnail(url=avatar_url)
+
+    embed.add_field(name="⏱️ 누적 기록", value=f"**{format_time(total)}**", inline=True)
+    
+    if online:
+        channel = bot.get_channel(ch_id)
+        ch_name = channel.name if channel else "알 수 없음"
+        embed.add_field(name="📍 현재 위치", value=f"`{ch_name}`", inline=True)
+        embed.add_field(name="⚖️ 가중치", value=f"**{weight}x** 적용 중", inline=False)
+    else:
+        embed.add_field(name="📍 상태", value="`현재 오프라인`", inline=True)
+
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
 
     total, online, weight, ch_id = calculate_realtime(member.id, row[0] if row else 0, bot)
     embed = discord.Embed(title=f"📡 {member.display_name} 정보", color=0x2ecc71 if online else 0x95a5a6)
